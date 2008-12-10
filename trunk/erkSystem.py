@@ -6,26 +6,75 @@ import os.path
 import time
 import thread
 import threading
+import random
+
+random.seed()
 
 DEBUGIRC = False
 DENIED = "Access Denied."
 PREFIX = ">>"
 modified = time.strftime('%y%m%d.%H%M%S',time.localtime(os.path.getmtime(__file__)))
 VERSIONREPLY = "Erkbot v"+modified+" Tizen"
+CREATE_EXPIRE = 60 # time to wait until bot has ops, before game creation is cancelled
 
-gameModes = {}
-gameModes["random"] = {}
-gameModes["random"]["help"] = "3-N players, 30-40% scum, 15-20% random roles"
-gameModes["random"]["mods"] = {}
-gameModes["random"]["mods"]["min"] = 3
-gameModes["random"]["mods"]["scum_min"] = .3
-gameModes["random"]["mods"]["scum_max"] = .4
-gameModes["random"]["mods"]["role_min"] = .15
-gameModes["random"]["mods"]["role_max"] = .2
+#=== GAME MODES ===
+modes = {}
+modes["random"] = {}
+modes["random"]["help"] = "3-N players, 25-34% scum, 10-16% random job or abilities"
+modes["random"]["min"] = 3
+modes["random"]["scum_min"] = 25.0
+modes["random"]["scum_max"] = 34.0
+modes["random"]["job_min"] = 10.0
+modes["random"]["job_max"] = 16.0
+
+#=== JOBS ===
+jobs = {}
+
+jobs["townie"] = {}
+jobs["townie"]["title"] = "Vanilla Townie"
+jobs["townie"]["abilities"] = ["vote"]
+jobs["townie"]["limit"] = 999
+jobs["townie"]["win"] = ["town"]
+jobs["townie"]["help"] = "You are a Vanilla Townie. You can vote on daily lynchings and you win with the rest of the town."
+jobs["townie"]["special"] = False
+
+jobs["scum"] = {}
+jobs["scum"]["title"] = "Mafia"
+jobs["scum"]["abilities"] = ["kill","vote"]
+jobs["scum"]["limit"] = 999
+jobs["scum"]["win"] = ["mafia"]
+jobs["scum"]["help"] = "You are a mafia member. You can designate 1 player each night to kill."
+jobs["scum"]["special"] = False
+
+jobs["doc"] = {}
+jobs["doc"]["title"] = "Town Doctor"
+jobs["doc"]["abilities"] = ["protect","vote"]
+jobs["doc"]["limit"] = 1
+jobs["doc"]["win"] = ["town"]
+jobs["doc"]["help"] = "You are a town doctor. You can protect 1 player each night and prevent a mafia hit on them."
+jobs["doc"]["special"] = True
+
+jobs["sanecop"] = {}
+jobs["sanecop"]["title"] = "Sane Police Officer"
+jobs["sanecop"]["abilities"] = ["investigate","vote"]
+jobs["sanecop"]["limit"] = 1
+jobs["sanecop"]["win"] = ["town"]
+jobs["sanecop"]["help"] = "You are a police officer. You can investigate 1 player each night to determine their faction."
+jobs["sanecop"]["special"] = True
+
+#=== SPECIALTIES ===
+specs = {}
+
+specs["rb"] = {}
+specs["rb"]["title"] = "Roleblocker"
+specs["rb"]["abilities"] = ["block"]
+specs["rb"]["limit"] = 999
+specs["rb"]["help"] = "Specialty: Roleblocker. You may block 1 player each night from performing their night actions."
+specs["rb"]["faction"] = ["mafia"]
 
 class erkBotClass(object):
-    #HOST = "irc.freenode.net"
-    HOST = "mainstreetlogo.com"
+    HOST = "irc.freenode.net"
+    #HOST = "mainstreetlogo.com"
     PORT = 6667
     NICK = "Erkbot"
     IDENT = "Erkbot"
@@ -33,7 +82,7 @@ class erkBotClass(object):
     CHANNEL = "#erk"
     owners = []
     ownerpassword = "ownerpass"
-    myName = ""
+    myNick = ""
     channels = {}
     games = {}
     sendqueue = []
@@ -112,7 +161,7 @@ def ircInput(line, b):
     word = string.split(line)
            
     if (word[1] == "001"): # irc connection established
-        b.myName = word[2]
+        b.myNick = word[2]
         print "connected as "+word[2]+"!"
         b.send("JOIN "+b.CHANNEL+"\r\n")
         b.channels = {}
@@ -133,8 +182,8 @@ def ircInput(line, b):
         if nick in b.owners:
             b.owners.remove(nick)
             b.owners.append(newnick)
-        if nick == b.myName:
-            b.myName = newnick
+        if nick == b.myNick:
+            b.myNick = newnick
         oldnick = {}
         for chan in b.channels.iterkeys():
             if nick in b.channels[chan]["nicks"]:
@@ -178,11 +227,7 @@ def ircInput(line, b):
         chan = word[2][1:]
         print "*** "+nick+"@"+chan+" joins"
 
-        gname = string.join(string.split(chan,'_')[1:],'_')
-        if b.games.has_key(gname):
-            if nick != b.myName and b.games[gname]["status"] == 1:
-                b.games[gname]["players"][nick] = {}
-                privMsg(b,chan,nick+" has joined the game. "+str(playerCount(b,gname))+" total")
+        joinGame(b,chan,nick)
         if b.channels.has_key(chan):
             if not b.channels[chan]["nicks"].has_key(nick):
                 b.channels[chan]["nicks"][nick] = []
@@ -226,23 +271,27 @@ def ircInput(line, b):
             else:
                 param += 1
                 if b.channels.has_key(chan):
-                    if b.channels[chan]["nicks"].has_key(nick):
-                        if mode == 1 and char not in b.channels[chan]["nicks"][nick]:
-                            b.channels[chan]["nicks"][nick].append(char)
-                        elif mode == 2 and char in b.channels[chan]["nicks"][nick]:
-                            b.channels[chan]["nicks"][nick].remove(char)
+                    try:
+                        nick = word[param]
+                        if b.channels[chan]["nicks"].has_key(nick):
+                            if mode == 1 and char not in b.channels[chan]["nicks"][nick]:
+                                b.channels[chan]["nicks"][nick].append(char)
+                            elif mode == 2 and char in b.channels[chan]["nicks"][nick]:
+                                b.channels[chan]["nicks"][nick].remove(char)
+                    except:
+                        pass # this is a channel mode being set!
     elif (word[1] == "PRIVMSG"): # user messages a channel or erk directly
         SUPRESS = True
         longHost = hostBreakup(word[0])
         nick, ident, domain = longHost
         chan = word[2]
-        replyto = nick if b.myName == chan else chan
+        replyto = nick if b.myNick == chan else chan
         text = string.join(word[3:],' ')[1:]
         print "<"+nick+"@"+chan+"> " + text # display to console
 
         words = string.split(text)
         if (text == "who are you?"):
-            privMsg(b,replyto,b.myName+".")
+            privMsg(b,replyto,b.myNick+".")
         elif text == chr(1)+"VERSION"+chr(1):
             sendNotice(b,nick,chr(1)+"VERSION "+VERSIONREPLY+chr(1))
         elif (words[0][0:len(PREFIX)] == PREFIX): # command prefix
@@ -259,7 +308,7 @@ def ircInput(line, b):
         print line
 def doCommand(b, longHost, chan, command, params = ""):
     nick, ident, domain = longHost
-    replyto = nick if b.myName == chan else chan
+    replyto = nick if b.myNick == chan else chan
     if command == "checkmode":
         if params == "":
             params = "o"
@@ -282,7 +331,7 @@ def doCommand(b, longHost, chan, command, params = ""):
         available["channels"] = "Debug. Relays internal channel list, optional argument lists nicks associated with that channel."
         available["nicks"] = "Debug. Relays internal channel->nick list for current channel. Optional argument lists modes associated with given nick. Must be used in a channel."
         available["list"] = "Shows currently active games."
-        available["create"] = "Creates a new game. Example: "+PREFIX+"create [name] [style]"
+        available["create"] = "Creates a new game. Example: "+PREFIX+"create [name] [mode]"
         available["settings"] = "Debug. Shows IRC server settings, optional argument will list setting value."
         available["destroy"] = "Removes a currently active game. This can only be done by the game creator. Example: "+PREFIX+"destroy [channel]"
         if params == "":
@@ -329,13 +378,23 @@ def doCommand(b, longHost, chan, command, params = ""):
     elif command == "unverify" and nick in b.owners:
         b.owners.remove(nick)
         privMsg(b,replyto,"You have been unverified.")
+    elif command == "mass" and nick in b.owners:
+        if params == "voice":
+            massMode(b,chan,"+","v",[b.myNick])
+        elif params == "devoice":
+            massMode(b,chan,"-","v",[b.myNick])
+        elif params == "op":
+            massMode(b,chan,"+","o",[b.myNick])
+        elif params == "deop":
+            massMode(b,chan,"-","o",[b.myNick])
+        pass
     elif command == "list":
         if len(b.games) > 0:
             for gname in b.games.iterkeys():
                 gowner = b.games[gname]["owner"]
                 gchan = b.games[gname]["channel"]
                 gstatus = b.games[gname]["status"]
-                gstyle = b.games[gname]["style"]
+                gmode = b.games[gname]["mode"]
                 gstatus2 = ""
                 if gstatus == 0:
                     gstatus2 = "creating"
@@ -343,10 +402,10 @@ def doCommand(b, longHost, chan, command, params = ""):
                     gstatus2 = "waiting for players"
                 else:
                     gstatus2 = "unknown ["+str(gstatus)+"]"
-                privMsg(b,replyto,gchan+" ("+gstyle+", "+gstatus2+") by "+gowner+" ["+str(playerCount(b,gname))+" players]")
+                privMsg(b,replyto,gchan+" ("+gmode+", "+gstatus2+") by "+gowner+" ["+str(playerCount(b,gname))+" players]")
         else:
             privMsg(b,replyto,"There are no games.")
-    elif command == "restart" and (nick in b.owners):
+    elif command == "restart" and nick in b.owners:
         privMsg(b,replyto,"Restarting....")
         b.send("QUIT :Restarting.\r\n")
         while len(b.sendqueue) > 0:
@@ -355,7 +414,7 @@ def doCommand(b, longHost, chan, command, params = ""):
         b.disconnect()
         print "Reconnecting...",
         b.connect()
-    elif command == "die" and (nick in b.owners):
+    elif command == "die" and nick in b.owners:
         privMsg(b,replyto,"Shutting down....")
         b.send("QUIT :Shutting down.\r\n")
         while len(b.sendqueue) > 0:
@@ -363,38 +422,79 @@ def doCommand(b, longHost, chan, command, params = ""):
         time.sleep(1)
         b.disconnect()
         sys.exit()
-    elif command == "exec" and (nick in b.owners):
+    elif command == "exec" and nick in b.owners:
         print "> "+params
         b.send(params+"\r\n")
+    elif command == "start":
+        try:
+            if params != "":
+                startchan = b.CHANNEL + "_" + string.split(params)[0]
+            else:
+                startchan = chan
+            dostart = ""
+            diequiet = False
+            for gname in b.games.iterkeys():
+                if b.games[gname]["channel"] == startchan:
+                    if b.games[gname]["owner"] == nick or nick in b.owners:
+                        dostart = gname
+                    else:
+                        privMsg(b,replyto,"You must be the game owner to start that game.")
+                        diequiet = True
+            if dostart == "":
+                if not diequiet:                
+                    privMsg(b,replyto,"Game does not exist. ("+startchan+")")                
+            elif b.games[gname]["status"] < 1:
+                privMsg(b,replyto,"Game cannot be started in its current state.")
+            elif b.games[gname]["status"] > 1:
+                privMsg(b,replyto,"Game has already been started.")
+            else:
+                gmode = b.games[gname]["mode"]
+                need = modes[gmode]["min"] - len(b.games[gname]["players"])
+                if need > 0:                    
+                    privMsg(b,replyto,"Cannot start. Need at least "+str(need)+" more.")
+                else:
+                    startGame(b,gname) # looks good so far, try to start game.
+        except:
+            privMsg(b,replyto,"Oops! Unexpected exception in START command. Please check console for debug info.")
+            print sys.exc_info()
     elif command == "create":
         gname = ""
         if params != "":
             sParams = string.split(params)
             gname = string.split(sParams[0],',')[0]
             try:
-                gstyle = sParams[1]
+                gmode = sParams[1]
             except:
-                gstyle = "random"
+                gmode = "random"
         if gname == "":
             gname = "game"+str(len(b.games) + 1)
-            gstyle = "random"
+            gmode = "random"
         gchan = b.CHANNEL+"_"+gname
         if b.games.has_key(gname):
             privMsg(b,replyto,"That game ("+gname+") has already been created.")
         elif int(b.ircsettings['CHANNELLEN']) < len(gchan):
             privMsg(b,replyto,"Cannot create game, name too long.")
-        elif gstyle not in gameModes:
-            privMsg(b,replyto,"Unknown game style: "+gstyle)
+        elif gmode not in modes:
+            privMsg(b,replyto,"Unknown game mode: "+gmode)
         else:
             b.games[gname] = {}
             b.games[gname]["owner"] = nick
             b.games[gname]["channel"] = gchan
             b.games[gname]["status"] = 0
-            b.games[gname]["style"] = gstyle
-            b.games[gname]["expire"] = time.time() + 60
+            b.games[gname]["mode"] = gmode
+            b.games[gname]["expire"] = time.time() + CREATE_EXPIRE
             b.games[gname]["reqop"] = False
             b.games[gname]["players"] = {}
+            b.games[gname]["dead"] = []
+            b.games[gname]["cycle"] = 0
             b.send("JOIN "+gchan+"\r\n")
+    elif command == "modes":
+        if params == "":
+            privMsg(b,replyto,"Modes: "+string.join(modes))
+        elif modes.has_key(params):
+            privMsg(b,replyto,params+" mode: "+modes[params]["help"])
+        else:
+            privMsg(b,replyto,"Invalid mode.")
     elif command == "settings":
         try:
             if params == "":
@@ -402,9 +502,16 @@ def doCommand(b, longHost, chan, command, params = ""):
             elif b.ircsettings.has_key(params):
                 privMsg(b,replyto,params+" setting: "+str(b.ircsettings[params]))
             else:
-                privMsg(b,replyto,"Invalid setting!")
+                privMsg(b,replyto,"Invalid setting.")
         except:
             privMsg(b,replyto,"Oops, exception! "+sys.exc_info()[0])
+    elif command == "join":
+        joinGame(b,chan,nick,True)
+    elif command == "forcestart" and nick in b.owners:
+        if b.games.has_key(params):
+            startGame(b,params)
+        else:
+            privMsg(b,replyto,"Game does not exist.")
     elif command == "destroy":
         try:
             if params != "":
@@ -428,28 +535,160 @@ def doCommand(b, longHost, chan, command, params = ""):
             print "Unexpected DESTROY error:", sys.exc_info()[0]
     else:
         privMsg(b,replyto,"Unknown command: "+command)
-                    
+
+def joinGame(b, chan, nick, manual = False):
+    gname = string.join(string.split(chan,'_')[1:],'_')
+    if b.games.has_key(gname):
+        if nick != b.myNick and b.games[gname]["status"] == 1:
+            if b.games[gname]["players"].has_key(nick) and manual:
+                privMsg(b,chan,"You are already in this game, "+nick)
+            else:
+                b.games[gname]["players"][nick] = {}
+                b.games[gname]["players"][nick]["specs"] = []
+                b.games[gname]["players"][nick]["job"] = ""
+                privMsg(b,chan,nick+" has joined the game. "+str(playerCount(b,gname))+" total")
+        elif manual and b.games[gname]["status"] < 1:
+            privMsg(b,chan,"Still attempting to create game. Cannot join.")
+        elif manual and b.games[gname]["status"] > 1:
+            privMsg(b,chan,"Game has already start, "+nick)
+            
+def startGame(b,gname):
+    gchan = b.games[gname]["channel"]
+    massMode(b,gchan,"-","o",[b.myNick]) # make sure nobody has ops
+    massMode(b,gchan,"-","v",[b.myNick]) # make sure nobody has voice
+
+    gowner = b.games[gname]["owner"]
+    gmode = b.games[gname]["mode"]
+    gtopic = gname+" ("+gmode+") "+str(playerCount(b,gname))+" players (assigning jobs)"
+    
+    b.send("MODE "+gchan+" +m\r\n") # moderate
+    b.send("TOPIC "+gchan+" :"+gtopic+"\r\n") # set topic
+    privMsg(b,gchan,"Game "+gname+" has started, sending job messages. Day 1 will happen once everyone has been notified.")
+
+    gplayers = b.games[gname]["players"].copy()
+    privMsg(b,gchan,"Players: "+string.join(gplayers))
+
+# === assign jobs
+    pool = gplayers.copy()
+
+    # determine scum amount and select them
+    minScum = int(round(float((float(modes[gmode]["scum_min"]) / 100) * len(gplayers))))
+    maxScum = int(round(float((float(modes[gmode]["scum_max"]) / 100) * len(gplayers))))
+    scumCount = int(random.randint(minScum,maxScum))
+    scumPlayers = random.sample(pool,scumCount)
+
+    # take the scum out of the pool, initialize them
+    for p in scumPlayers:
+        del pool[p]
+        rj = rndJob(b,"mafia",False,gplayers)
+        gplayers[p]["job"] = rj
+
+    # assign scum specialties, if appropriate
+    specScumPlayers = random.sample(scumPlayers,maxScum - minScum)
+    for p in specScumPlayers:
+        spec = rndSpec(b,"mafia",gplayers)
+        if spec != "":
+            gplayers[p]["specs"].append(spec)
+
+    # determine special townie roles
+    minRole = int(round(float((float(modes[gmode]["job_min"]) / 100) * len(gplayers))))
+    maxRole = int(round(float((float(modes[gmode]["job_max"]) / 100) * len(gplayers))))
+    roleCount = int(random.randint(minRole,maxRole))
+    roleTownies = random.sample(pool,roleCount)
+
+    # take the special roles out of the pool, initialize them
+    for p in roleTownies:
+        del pool[p]
+        gplayers[p]["job"] = rndJob(b,"town",True,gplayers)
+
+    # assign the rest of the pool
+    for p in pool.iterkeys():
+        gplayers[p]["job"] = rndJob(b,"town",False,gplayers)
+
+    # commit the changes to the main dictionary
+    b.games[gname]["players"] = gplayers
+
+    privMsg(b,gchan,repr(b.games[gname]["players"]))
+    
+"""
+modes["random"]["scum_min"] = 25.0
+modes["random"]["scum_max"] = 34.0
+modes["random"]["job_min"] = 10.0
+modes["random"]["job_max"] = 16.0
+"""
+def rndJob(b,win,special,gplayers = {}):
+    pool = []
+    for job in jobs.iterkeys():
+        count = 0
+        for player in gplayers.iterkeys():
+            if job in gplayers[player]["job"]:
+                count += 1
+        if win in jobs[job]["win"] and jobs[job]["special"] == special and count < jobs[job]["limit"]:
+            pool.append(job)
+    tmpreturn = "" if len(pool) < 1 else random.sample(pool,1)[0]
+    return tmpreturn
+def rndSpec(b,faction,gplayers = {}):
+    pool = []
+    for spec in specs.iterkeys():
+        count = 0
+        for player in gplayers.iterkeys():
+            if spec in gplayers[player]["specs"]:
+                count += 1
+        if faction in specs[spec]["faction"] and count < specs[spec]["limit"]:
+            pool.append(spec)
+    return "" if len(pool) < 1 else random.sample(pool,1)[0]
+def massMode(b,chan,switch,mode,butNot = []):
+    if not b.channels.has_key(chan):
+        return
+    masslist = []
+    for nick in b.channels[chan]["nicks"].iterkeys():
+        if switch == "-":
+            if nick not in butNot and b.hasMode(nick,mode,chan):
+                masslist.append(nick)
+        else:
+            if nick not in butNot and not b.hasMode(nick,mode,chan):
+                masslist.append(nick)
+    i, queue = 0, []
+    for nick in masslist:
+        i += 1
+        queue.append(nick)
+        if i >= 5:
+            modes, i, queue = mode * i, 0, []
+            b.send("MODE "+chan+" "+switch+mode+" "+string.join(queue)+"\r\n")
+            masslist.remove(nick)
+    if len(queue) > 0:
+        modes = mode * len(queue)
+        b.send("MODE "+chan+" "+switch+(mode * len(queue))+" "+string.join(queue)+"\r\n")
+
 def checkGameStatus(b):
     delgames = []
     if len(b.games) > 0:
         for gname in b.games.iterkeys():
             if b.games[gname]["status"] == 0:
-                if b.hasMode(b.myName,"o",b.games[gname]["channel"]):
+                gchan = b.games[gname]["channel"]
+                if b.hasMode(b.myNick,"o",b.games[gname]["channel"]):
                     b.games[gname]["status"] = 1
+                    b.send("MODE "+gchan+" -m\r\n")
+                    gowner = b.games[gname]["owner"]
+                    gmode = b.games[gname]["mode"]
+                    gtopic = gname+" ("+gmode+") waiting for players"
+                    b.send("TOPIC "+gchan+" :"+gtopic+"\r\n")
                     privMsg(b,b.CHANNEL,"Game "+gname+" created. Join "+b.games[gname]["channel"]+" to play.")
                 elif b.games[gname]["expire"] <= time.time():
                     privMsg(b,b.CHANNEL,"Could not create game "+gname)
-                    b.send("PART "+b.games[gname]["channel"]+"\r\n")
+                    b.send("PART "+gchan+"\r\n")
                     delgames.append(gname)
-                elif b.games[gname]["expire"] - 7 <= time.time() and not b.games[gname]["reqop"]:
+                elif b.games[gname]["expire"] - int(CREATE_EXPIRE / 2) <= time.time() and not b.games[gname]["reqop"]:
                     privMsg(b,b.games[gname]["channel"],"I require operator status to create this game.")
                     b.games[gname]["reqop"] = True
         for gname in delgames:
             del b.games[gname]
+            
 def playerCount(b,gname):
     if b.games.has_key(gname):
         return len(b.games[gname]["players"])
     return 0
+
 def delPlayer(b,nick,gnameAlpha = False):
     keepGoing = True
     gname = ""
@@ -470,12 +709,15 @@ def delPlayer(b,nick,gnameAlpha = False):
                 else:
                     del b.games[gname]["players"][nick]
                     privMsg(b,b.games[gname]["channel"],nick+" has left the game. "+str(playerCount(b,gname))+" remaining.")
+                    
 def privMsg(b,target,message):
-    print "<"+b.myName+"@"+target+"> "+message
+    print "<"+b.myNick+"@"+target+"> "+message
     b.send("PRIVMSG "+target+" :"+message+"\r\n")
+    
 def sendNotice(b,target,message):
-    print "-"+b.myName+"@"+target+"- "+message
+    print "-"+b.myNick+"@"+target+"- "+message
     b.send("NOTICE "+target+" :"+message+"\r\n")
+    
 def hostBreakup(longHost):
     host = longHost[1:].split("@")
     if len(host) == 1:
