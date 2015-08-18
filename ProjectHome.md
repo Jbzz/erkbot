@@ -1,0 +1,1 @@
+ErkBot is a bot written in Python that connects to an IRC server and moderates games of Mafia and/or Werewolf.
